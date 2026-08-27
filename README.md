@@ -1,5 +1,48 @@
 # Product Engineer Challenge
 
+A multi-service e-commerce API (NestJS + PostgreSQL + Redis + TypeORM) shipped with
+deliberately seeded bugs. The task was to find the root causes and fix them, without
+adding features or redesigning the system.
+
+## What was found
+
+27 hypotheses were raised during the investigation: **20 were real bugs, 7 were false
+alarms**. Everything marked confirmed was reproduced against the running application,
+not just read in the code.
+
+The headline finding: **Redis was never used**. `CacheModule` received the store under
+`store` (singular) where `@nestjs/cache-manager` v3 only reads `stores` (plural), so the
+option was silently dropped and the cache ran in memory the whole time — with Redis
+connected and idle.
+
+## The fixes
+
+| PR | Area | Issues |
+|---|---|---|
+| [#1](../../pull/1) | Cache never reached Redis; ~65 s hangs when Redis was down | C11, C12 |
+| [#2](../../pull/2) | Stock oversell, no transaction, double restock on cancel | C1, C2, C10, C19 |
+| [#3](../../pull/3) | Full order detail built a circular reference | C3 |
+| [#4](../../pull/4) | Category tree broke past level 2; no cycle guard | C4, C5 |
+| [#5](../../pull/5) | One cache key for every search; nothing invalidated it | C6, C7, C18 |
+| [#6](../../pull/6) | Double charge on payment; 1000 retries with no backoff | C8, C9, C16 |
+| [#7](../../pull/7) | Decimals as strings, swallowed batch errors, no DTO whitelist | C13, C14, C15, C17 |
+
+Full write-up in [`docs/`](docs/): every problem with its repro and fix in
+[`docs/PROBLEMS.md`](docs/PROBLEMS.md), the debatable calls in
+[`docs/DECISIONS.md`](docs/DECISIONS.md).
+
+## What was deliberately left alone
+
+- **Pagination** on `findAll()` — adding `?page=&limit=` is a new feature, and a hard cap
+  would silently turn "all" into "some". Removing the redundant `eager` relations is the
+  in-scope mitigation.
+- **`synchronize: true`** (C20) — switching it off requires migrations, which is a redesign.
+- **`updateStock()`** — pre-existing public API left without callers by #2. Deleting it
+  changes the service's surface; it carries a comment pointing at the atomic methods.
+
+---
+
+
 A multi-service e-commerce API built with NestJS, PostgreSQL, and Redis.
 
 ## Architecture
