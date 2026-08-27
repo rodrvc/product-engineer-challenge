@@ -180,15 +180,11 @@ export class OrdersService {
       where: { id },
       relations: ['user', 'items', 'items.product', 'items.product.category'],
     });
-    
+
     if (!order) {
       throw new NotFoundException(`Order #${id} not found`);
     }
 
-    const enriched: any = { ...order };
-    enriched.user = { ...order.user };
-    enriched.user.latestOrder = enriched;
-
-    return JSON.parse(JSON.stringify(enriched));
+    return order;
   }
 }
