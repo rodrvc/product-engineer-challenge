@@ -1,8 +1,8 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CacheModule } from '@nestjs/cache-manager';
-import { redisStore } from 'cache-manager-ioredis-yet';
+import KeyvRedis from '@keyv/redis';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
@@ -29,14 +29,39 @@ import { Category } from './products/category.entity';
     }),
     CacheModule.registerAsync({
       isGlobal: true,
-      useFactory: async () => ({
-        store: await redisStore({
-          host: process.env.REDIS_HOST || 'localhost',
-          port: parseInt(process.env.REDIS_PORT || '6379', 10),
-          db: 0,
-          ttl: 60000,
-        }),
-      }),
+      useFactory: async () => {
+        const host = process.env.REDIS_HOST || 'localhost';
+        const port = parseInt(process.env.REDIS_PORT || '6379', 10);
+        const db = parseInt(process.env.REDIS_DB || '0', 10);
+
+        const store = new KeyvRedis({
+          url: `redis://${host}:${port}/${db}`,
+          socket: {
+            // With no wait limit, a Redis outage leaves cache-backed requests
+            // hanging for tens of seconds. This makes the command fail fast so
+            // the service falls back to the database.
+            connectTimeout: 500,
+            reconnectStrategy: (retries) => Math.min(retries * 200, 5000),
+          },
+          // Drop commands instead of queueing them while there is no
+          // connection: queueing them is what produces the long wait.
+          disableOfflineQueue: true,
+        });
+
+        // Without this listener, a connection failure emits an unhandled
+        // 'error' event and brings the process down.
+        store.on('error', (error: Error) =>
+          new Logger('CacheModule').error(
+            `Redis connection error: ${error.message}`,
+          ),
+        );
+
+        // `stores` plural: the only option @nestjs/cache-manager v3 reads.
+        // With `store` singular the instance was silently discarded and the
+        // cache fell back to the in-memory store, leaving Redis connected but
+        // unused.
+        return { stores: [store], ttl: 60000 };
+      },
     }),
     UsersModule,
     ProductsModule,
