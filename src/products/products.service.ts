@@ -111,23 +111,57 @@ export class ProductsService {
   }
 
   async getCategoryTree(categoryId: number): Promise<any> {
-    const category = await this.findCategory(categoryId);
-    return this.buildCategoryTree(category);
-  }
+    // Make sure the requested category exists (raises 404 otherwise).
+    await this.findCategory(categoryId);
 
-  private buildCategoryTree(category: Category): any {
-    const tree: any = {
-      id: category.id,
-      name: category.name,
-      children: [],
+    // findCategory only loads 'parent' and 'children' one level deep, so
+    // recursing over those relations breaks past the second level (the
+    // property is no longer loaded). Instead of requesting nested relations
+    // level by level, the whole categories table is fetched in a single query
+    // (the volume is small) and the tree is built in memory, both upwards
+    // (ancestors) and downwards (descendants).
+    const allCategories = await this.categoriesRepository.find();
+    const byId = new Map(allCategories.map(c => [c.id, c]));
+
+    const buildDescendants = (id: number, visited: Set<number>): any => {
+      const current = byId.get(id)!;
+      const node: any = {
+        id: current.id,
+        name: current.name,
+        children: [],
+      };
+
+      if (visited.has(id)) {
+        // Cycle detected: stop here returning the node without children
+        // instead of throwing, so the endpoint stays useful.
+        return node;
+      }
+      visited.add(id);
+
+      const children = allCategories.filter(c => c.parentId === id);
+      node.children = children.map(child => buildDescendants(child.id, visited));
+
+      return node;
     };
 
-    if (category.parentId) {
-      tree.parent = this.buildCategoryTree(category.parent);
-    }
+    const tree = buildDescendants(categoryId, new Set<number>());
 
-    if (category.children && category.children.length > 0) {
-      tree.children = category.children.map(child => this.buildCategoryTree(child));
+    // Ancestor chain: walk up through parentId to the root, stopping if an
+    // id repeats so it does not loop forever in a cycle.
+    const visitedAncestors = new Set<number>([categoryId]);
+    let node = tree;
+    let current = byId.get(categoryId);
+
+    while (current?.parentId != null && !visitedAncestors.has(current.parentId)) {
+      const parent = byId.get(current.parentId);
+      if (!parent) {
+        break;
+      }
+
+      node.parent = { id: parent.id, name: parent.name, children: [] };
+      visitedAncestors.add(parent.id);
+      node = node.parent;
+      current = parent;
     }
 
     return tree;
