@@ -1,8 +1,6 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 import { Order, OrderStatus } from './order.entity';
 import { OrderItem } from './order-item.entity';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -30,8 +28,6 @@ export class OrdersService {
     private ordersRepository: Repository<Order>,
     private usersService: UsersService,
     private productsService: ProductsService,
-    @Inject(CACHE_MANAGER)
-    private cacheManager: Cache,
     private dataSource: DataSource,
   ) {}
 
@@ -102,8 +98,9 @@ export class OrdersService {
     });
 
     // Invalidated after the commit: if the transaction rolls back the cache
-    // is still valid and does not need discarding.
-    await this.cacheManager.del('product-search');
+    // is still valid and does not need discarding. Delegated to
+    // ProductsService so as not to couple to its cache key scheme.
+    await this.productsService.invalidateSearchCache();
 
     return this.findOne(savedOrder.id);
   }
@@ -169,8 +166,9 @@ export class OrdersService {
     });
 
     // Invalidated after the commit: if the transaction rolls back the cache
-    // is still valid and does not need discarding.
-    await this.cacheManager.del('product-search');
+    // is still valid and does not need discarding. Delegated to
+    // ProductsService so as not to couple to its cache key scheme.
+    await this.productsService.invalidateSearchCache();
 
     return cancelledOrder;
   }
