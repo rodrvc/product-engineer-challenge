@@ -31,6 +31,47 @@ Full write-up in [`docs/`](docs/): every problem with its repro and fix in
 [`docs/PROBLEMS.md`](docs/PROBLEMS.md), the debatable calls in
 [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
+## Verifying the fixes
+
+With the stack up (`docker compose up -d && pnpm install && pnpm run start:dev`):
+
+```bash
+# C13 — decimals come back as numbers, not "301.50" strings
+curl -s localhost:3000/orders/2/full | jq '.total, .items[0].product.price'
+
+# C15 — properties not declared in the DTO are rejected
+curl -s -X POST localhost:3000/users -H 'Content-Type: application/json' \
+  -d '{"email":"a@b.com","name":"Ann","isAdmin":true}'
+# -> 400 "property isAdmin should not exist"
+
+# C14 — a failing batch names the ids that failed instead of reporting success
+curl -s -X POST localhost:3000/products/batch -H 'Content-Type: application/json' \
+  -d '{"productIds":[1,99999]}'
+# -> {"success":false,"processed":1,"failed":[99999]}
+
+# C6 — each search term gets its own cache entry
+curl -s 'localhost:3000/products/search?q=laptop' | jq -r '.[].name'
+curl -s 'localhost:3000/products/search?q=shoes'  | jq -r '.[].name'
+# before: the second query returned the first one's results
+
+# C8 — paying the same order twice charges once
+ORDER=$(curl -s -X POST localhost:3000/orders -H 'Content-Type: application/json' \
+  -d '{"userId":1,"items":[{"productId":1,"quantity":1}]}' | jq -r .id)
+curl -s -X POST localhost:3000/orders/$ORDER/pay   # 201 + transactionId
+curl -s -X POST localhost:3000/orders/$ORDER/pay   # 400, no second charge
+
+# C1 — concurrent orders cannot oversell.
+# Set stock to 10, then fire 4 concurrent orders of 3 (12 units for 10 in stock):
+for i in $(seq 1 4); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST localhost:3000/orders \
+    -H 'Content-Type: application/json' \
+    -d '{"userId":1,"items":[{"productId":1,"quantity":3}]}' &
+done; wait; echo
+# -> 201 201 201 400, stock left at 1. Before the fix all four succeeded.
+```
+
+Each problem's original reproduction is in [`docs/PROBLEMS.md`](docs/PROBLEMS.md).
+
 ## What was deliberately left alone
 
 - **Pagination** on `findAll()` — adding `?page=&limit=` is a new feature, and a hard cap
@@ -42,6 +83,9 @@ Full write-up in [`docs/`](docs/): every problem with its repro and fix in
 
 ---
 
+## Original challenge README
+
+Everything below is the brief as delivered, kept for reference.
 
 A multi-service e-commerce API built with NestJS, PostgreSQL, and Redis.
 

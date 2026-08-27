@@ -2,7 +2,7 @@
 
 Investigation was conducted by area (orders / products / users+infra) and each hypothesis was then subjected to review designed to refute it. Everything marked CONFIRMED was reproduced against the running application (real NestJS + Postgres 17 + Redis 7), not just by code inspection.
 
-Baseline unmodified: commit `055fade`. See `DECISIONS.md` for the rationale behind each decision.
+Baseline unmodified: commit `76640d2`. See `DECISIONS.md` for the rationale behind each decision.
 
 ## Test Environment
 
