@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
 import { Order } from './order.entity';
 import { Product } from '../products/product.entity';
+import { decimalColumnTransformer } from '../common/transformers/decimal.transformer';
 
 @Entity('order_items')
 export class OrderItem {
@@ -14,7 +15,7 @@ export class OrderItem {
   @Column({ name: 'order_id' })
   orderId: number;
 
-  @ManyToOne(() => Product, { eager: true })
+  @ManyToOne(() => Product)
   @JoinColumn({ name: 'product_id' })
   product: Product;
 
@@ -24,6 +25,6 @@ export class OrderItem {
   @Column()
   quantity: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, transformer: decimalColumnTransformer })
   price: number;
 }

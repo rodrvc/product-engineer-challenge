@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, ILike, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -9,6 +9,8 @@ import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
 
 @Injectable()
 export class ProductsService {
+  private readonly logger = new Logger(ProductsService.name);
+
   // Redis key holding the current version number of the search cache.
   private readonly searchCacheVersionKey = 'product-search:version';
 
@@ -43,11 +45,15 @@ export class ProductsService {
     return saved;
   }
 
+  // Pre-existing public API with no callers left: order flows now use the
+  // atomic decreaseStock/increaseStock below. It sets an absolute value read
+  // from a previous query, so it is subject to the lost-update race those
+  // methods were introduced to fix, and it does not invalidate the search
+  // cache. Prefer the atomic methods if this ever needs to be wired up again.
   async updateStock(id: number, quantity: number): Promise<Product> {
     const product = await this.findOne(id);
     product.stock = quantity;
     const saved = await this.productsRepository.save(product);
-    await this.invalidateSearchCache();
     return saved;
   }
 
@@ -123,8 +129,12 @@ export class ProductsService {
             { name: ILike(`%${normalizedQuery}%`) },
             { description: ILike(`%${normalizedQuery}%`) },
           ],
+          // Requested explicitly to preserve the response shape the removed
+          // eager relation used to provide: search must serialize a Product
+          // the same way /products and /products/:id do.
+          relations: ['category'],
         })
-      : await this.productsRepository.find();
+      : await this.productsRepository.find({ relations: ['category'] });
 
     await this.cacheManager.set(cacheKey, results, 60000);
     return results;
@@ -210,9 +220,12 @@ export class ProductsService {
     return tree;
   }
 
-  async processProductBatch(productIds: number[]): Promise<{ success: boolean; processed: number }> {
+  async processProductBatch(
+    productIds: number[],
+  ): Promise<{ success: boolean; processed: number; failed: number[] }> {
     let processed = 0;
-    
+    const failed: number[] = [];
+
     try {
       for (const id of productIds) {
         try {
@@ -221,13 +234,21 @@ export class ProductsService {
           await this.productsRepository.save(product);
           processed++;
         } catch (error) {
-          console.log('Error processing product');
+          // Log the actual error together with the failing id, instead of
+          // swallowing it, so we can diagnose which product failed and why.
+          this.logger.error(
+            `Error processing product #${id}: ${error instanceof Error ? error.message : error}`,
+            error instanceof Error ? error.stack : undefined,
+          );
+          failed.push(id);
         }
       }
     } catch (error) {
-      throw new BadRequestException('Batch processing failed');
+      throw new BadRequestException(
+        `Batch processing failed: ${error instanceof Error ? error.message : error}`,
+      );
     }
 
-    return { success: true, processed };
+    return { success: failed.length === 0, processed, failed };
   }
 }

@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, OneToMany } from 'typeorm';
 import { Category } from './category.entity';
 import { OrderItem } from '../orders/order-item.entity';
+import { decimalColumnTransformer } from '../common/transformers/decimal.transformer';
 
 @Entity('products')
 export class Product {
@@ -13,7 +14,7 @@ export class Product {
   @Column({ nullable: true })
   description: string;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, transformer: decimalColumnTransformer })
   price: number;
 
   @Column({ default: 0 })
@@ -25,7 +26,7 @@ export class Product {
   @Column({ name: 'category_id', nullable: true })
   categoryId: number;
 
-  @ManyToOne(() => Category, (category) => category.products, { eager: true })
+  @ManyToOne(() => Category, (category) => category.products)
   @JoinColumn({ name: 'category_id' })
   category: Category;
 
