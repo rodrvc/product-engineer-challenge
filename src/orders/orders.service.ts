@@ -21,8 +21,6 @@ const paymentService = {
 
 @Injectable()
 export class OrdersService {
-  private maxRetries = 1000;
-
   constructor(
     @InjectRepository(Order)
     private ordersRepository: Repository<Order>,
@@ -113,24 +111,65 @@ export class OrdersService {
 
   async processPayment(orderId: number): Promise<{ success: boolean; transactionId: string }> {
     const order = await this.findOne(orderId);
-    
-    let lastError: Error;
-    for (let attempt = 0; attempt < this.maxRetries; attempt++) {
+
+    // Reserve the charge attempt by transitioning the status BEFORE calling
+    // the external service, using the same atomic pattern as cancel(): the
+    // WHERE only affects the row while it is still pending, so out of two
+    // concurrent requests only one wins the reservation and the other gets 0
+    // affected rows. This prevents the double charge without a separate lock.
+    // If the charge ends up failing for good it is reverted to PENDING (see
+    // below), so an order is never left confirmed without being charged.
+    const reserved = await this.dataSource
+      .createQueryBuilder()
+      .update(Order)
+      .set({ status: OrderStatus.CONFIRMED })
+      .where('id = :id AND status = :pending', {
+        id: orderId,
+        pending: OrderStatus.PENDING,
+      })
+      .execute();
+
+    if ((reserved.affected ?? 0) === 0) {
+      throw new BadRequestException(
+        `Order #${orderId} cannot be paid: it is not pending (already confirmed or in another state)`,
+      );
+    }
+
+    const maxAttempts = 3;
+    let lastError: Error = new Error('Payment failed for an unknown reason');
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const result = await paymentService.processPayment(orderId, Number(order.total));
-        
+
         if (result.success) {
-          order.status = OrderStatus.CONFIRMED;
-          await this.ordersRepository.save(order);
           return result;
         }
+
+        lastError = new Error('Payment service returned an unsuccessful result');
       } catch (error) {
         lastError = error;
-        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+
+      // Exponential backoff with jitter to avoid retrying in a burst.
+      // No wait after the last failed attempt.
+      if (attempt < maxAttempts) {
+        const baseDelay = 100 * 2 ** (attempt - 1);
+        const jitter = Math.random() * 100;
+        await new Promise(resolve => setTimeout(resolve, baseDelay + jitter));
       }
     }
-    
-    throw lastError!;
+
+    // The charge failed for good: release the reservation so the order is not
+    // left confirmed without having been charged.
+    await this.ordersRepository.update(
+      { id: orderId, status: OrderStatus.CONFIRMED },
+      { status: OrderStatus.PENDING },
+    );
+
+    throw new BadRequestException(
+      `Payment for order #${orderId} failed after ${maxAttempts} attempts: ${lastError.message}`,
+    );
   }
 
   async cancel(id: number): Promise<Order> {
