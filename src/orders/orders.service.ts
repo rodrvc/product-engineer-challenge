@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Order, OrderStatus } from './order.entity';
@@ -28,12 +28,11 @@ export class OrdersService {
   constructor(
     @InjectRepository(Order)
     private ordersRepository: Repository<Order>,
-    @InjectRepository(OrderItem)
-    private orderItemsRepository: Repository<OrderItem>,
     private usersService: UsersService,
     private productsService: ProductsService,
     @Inject(CACHE_MANAGER)
     private cacheManager: Cache,
+    private dataSource: DataSource,
   ) {}
 
   async findAll(): Promise<Order[]> {
@@ -62,36 +61,50 @@ export class OrdersService {
 
   async create(createOrderDto: CreateOrderDto): Promise<Order> {
     const user = await this.usersService.findOne(createOrderDto.userId);
-    
-    const order = this.ordersRepository.create({
-      userId: user.id,
-      status: OrderStatus.PENDING,
-    });
-    const savedOrder = await this.ordersRepository.save(order);
-    
-    let total = 0;
-    for (const itemDto of createOrderDto.items) {
-      const product = await this.productsService.findOne(itemDto.productId);
-      
-      if (product.stock < itemDto.quantity) {
-        throw new BadRequestException(`Not enough stock for ${product.name}`);
-      }
-      
-      const orderItem = this.orderItemsRepository.create({
-        orderId: savedOrder.id,
-        productId: product.id,
-        quantity: itemDto.quantity,
-        price: product.price,
+
+    const savedOrder = await this.dataSource.transaction(async (manager) => {
+      const order = manager.create(Order, {
+        userId: user.id,
+        status: OrderStatus.PENDING,
       });
-      
-      await this.orderItemsRepository.save(orderItem);
-      total += product.price * itemDto.quantity;
-      this.productsService.updateStock(product.id, product.stock - itemDto.quantity);
-    }
-    
-    savedOrder.total = total;
-    await this.ordersRepository.save(savedOrder);
-    
+      const savedOrder = await manager.save(order);
+
+      let total = 0;
+      for (const itemDto of createOrderDto.items) {
+        const product = await this.productsService.findOne(itemDto.productId);
+
+        // The WHERE itself validates stock, so two concurrent requests
+        // cannot sell the same units.
+        const decremented = await this.productsService.decreaseStock(
+          manager,
+          product.id,
+          itemDto.quantity,
+        );
+        if (!decremented) {
+          throw new BadRequestException(`Not enough stock for ${product.name}`);
+        }
+
+        const orderItem = manager.create(OrderItem, {
+          orderId: savedOrder.id,
+          productId: product.id,
+          quantity: itemDto.quantity,
+          price: product.price,
+        });
+
+        await manager.save(orderItem);
+        total += Number(product.price) * itemDto.quantity;
+      }
+
+      savedOrder.total = total;
+      await manager.save(savedOrder);
+
+      return savedOrder;
+    });
+
+    // Invalidated after the commit: if the transaction rolls back the cache
+    // is still valid and does not need discarding.
+    await this.cacheManager.del('product-search');
+
     return this.findOne(savedOrder.id);
   }
 
@@ -125,18 +138,41 @@ export class OrdersService {
 
   async cancel(id: number): Promise<Order> {
     const order = await this.findOne(id);
-    
+
     if (order.status !== OrderStatus.PENDING) {
       throw new BadRequestException('Only pending orders can be cancelled');
     }
-    
-    for (const item of order.items) {
-      const product = await this.productsService.findOne(item.productId);
-      await this.productsService.updateStock(product.id, product.stock + item.quantity);
-    }
-    
-    order.status = OrderStatus.CANCELLED;
-    return this.ordersRepository.save(order);
+
+    const cancelledOrder = await this.dataSource.transaction(async (manager) => {
+      // The status transition decides who restocks: the WHERE only affects
+      // rows while the order is still pending, so two concurrent
+      // cancellations cannot return the stock twice.
+      const transitioned = await manager
+        .createQueryBuilder()
+        .update(Order)
+        .set({ status: OrderStatus.CANCELLED })
+        .where('id = :id AND status = :pending', {
+          id,
+          pending: OrderStatus.PENDING,
+        })
+        .execute();
+
+      if ((transitioned.affected ?? 0) === 0) {
+        throw new BadRequestException('Only pending orders can be cancelled');
+      }
+
+      for (const item of order.items) {
+        await this.productsService.increaseStock(manager, item.productId, item.quantity);
+      }
+
+      return manager.findOneOrFail(Order, { where: { id } });
+    });
+
+    // Invalidated after the commit: if the transaction rolls back the cache
+    // is still valid and does not need discarding.
+    await this.cacheManager.del('product-search');
+
+    return cancelledOrder;
   }
 
   async getOrderWithFullDetails(id: number): Promise<any> {

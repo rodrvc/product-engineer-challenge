@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
@@ -42,6 +42,30 @@ export class ProductsService {
     const product = await this.findOne(id);
     product.stock = quantity;
     return this.productsRepository.save(product);
+  }
+
+  // Atomic decrement: the stock check travels inside the UPDATE itself, so
+  // two concurrent decrements cannot oversell.
+  // Takes the EntityManager to run inside the caller's transaction.
+  async decreaseStock(manager: EntityManager, id: number, quantity: number): Promise<boolean> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(Product)
+      .set({ stock: () => 'stock - :quantity' })
+      .where('id = :id AND stock >= :quantity', { id, quantity })
+      .execute();
+    return (result.affected ?? 0) > 0;
+  }
+
+  // Atomic restock, counterpart of the decrement, used on cancellation.
+  async increaseStock(manager: EntityManager, id: number, quantity: number): Promise<void> {
+    await manager
+      .createQueryBuilder()
+      .update(Product)
+      .set({ stock: () => 'stock + :quantity' })
+      .where('id = :id', { id })
+      .setParameter('quantity', quantity)
+      .execute();
   }
 
   async remove(id: number): Promise<void> {
