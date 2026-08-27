@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, ILike, Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Product } from './product.entity';
@@ -9,6 +9,9 @@ import { CreateProductDto, CreateCategoryDto } from './dto/create-product.dto';
 
 @Injectable()
 export class ProductsService {
+  // Redis key holding the current version number of the search cache.
+  private readonly searchCacheVersionKey = 'product-search:version';
+
   constructor(
     @InjectRepository(Product)
     private productsRepository: Repository<Product>,
@@ -35,13 +38,17 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto): Promise<Product> {
     const product = this.productsRepository.create(createProductDto);
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   async updateStock(id: number, quantity: number): Promise<Product> {
     const product = await this.findOne(id);
     product.stock = quantity;
-    return this.productsRepository.save(product);
+    const saved = await this.productsRepository.save(product);
+    await this.invalidateSearchCache();
+    return saved;
   }
 
   // Atomic decrement: the stock check travels inside the UPDATE itself, so
@@ -71,20 +78,53 @@ export class ProductsService {
   async remove(id: number): Promise<void> {
     const product = await this.findOne(id);
     await this.productsRepository.remove(product);
+    await this.invalidateSearchCache();
+  }
+
+  // Invalidates every product search cache entry.
+  // Instead of deleting each 'product-search:<query>' key (which would mean
+  // knowing or enumerating every term ever searched), a version key that is
+  // part of the search keys is incremented: bumping the version orphans the
+  // old entries, which expire on their own by TTL, with no pattern-delete
+  // commands against Redis.
+  // Exposed as a public method so other services (e.g. OrdersService, which
+  // invalidates when stock changes through orders) do not need to know
+  // ProductsService's cache key scheme.
+  async invalidateSearchCache(): Promise<void> {
+    const currentVersion =
+      (await this.cacheManager.get<number>(this.searchCacheVersionKey)) ?? 0;
+
+    // No expiry: if the version expired it would fall back to zero and
+    // searches would read again the old entries this invalidation discarded.
+    await this.cacheManager.set(
+      this.searchCacheVersionKey,
+      currentVersion + 1,
+      0,
+    );
   }
 
   async searchProducts(query: string): Promise<Product[]> {
-    const cacheKey = 'product-search';
+    const normalizedQuery = query.trim().toLowerCase();
+    const version = (await this.cacheManager.get<number>(this.searchCacheVersionKey)) ?? 0;
+    const cacheKey = `product-search:v${version}:${normalizedQuery}`;
+
     const cached = await this.cacheManager.get<Product[]>(cacheKey);
     if (cached) {
       return cached;
     }
 
-    const products = await this.productsRepository.find();
-    const results = products.filter(p => 
-      p.name.toLowerCase().includes(query.toLowerCase()) ||
-      (p.description || '').toLowerCase().includes(query.toLowerCase())
-    );
+    // Filtering in the database (ILike = case-insensitive) instead of loading
+    // the whole table and filtering in memory. The array of conditions in
+    // `where` translates to OR, so a product with no description still shows
+    // up when its name matches.
+    const results = normalizedQuery
+      ? await this.productsRepository.find({
+          where: [
+            { name: ILike(`%${normalizedQuery}%`) },
+            { description: ILike(`%${normalizedQuery}%`) },
+          ],
+        })
+      : await this.productsRepository.find();
 
     await this.cacheManager.set(cacheKey, results, 60000);
     return results;
@@ -118,8 +158,9 @@ export class ProductsService {
     // recursing over those relations breaks past the second level (the
     // property is no longer loaded). Instead of requesting nested relations
     // level by level, the whole categories table is fetched in a single query
-    // (the volume is small) and the tree is built in memory, both upwards
-    // (ancestors) and downwards (descendants).
+    // and the tree is built in memory, both upwards (ancestors) and downwards
+    // (descendants). Fine while the catalog stays small; with tens of
+    // thousands of rows a recursive CTE is the right call.
     const allCategories = await this.categoriesRepository.find();
     const byId = new Map(allCategories.map(c => [c.id, c]));
 
@@ -146,8 +187,10 @@ export class ProductsService {
 
     const tree = buildDescendants(categoryId, new Set<number>());
 
-    // Ancestor chain: walk up through parentId to the root, stopping if an
-    // id repeats so it does not loop forever in a cycle.
+    // Ancestor chain: walk up through parentId to the root, stopping if an id
+    // repeats so it does not loop forever in a cycle. Each ancestor keeps
+    // children empty on purpose: they are lineage context, and populating them
+    // would repeat the branch being walked up.
     const visitedAncestors = new Set<number>([categoryId]);
     let node = tree;
     let current = byId.get(categoryId);
