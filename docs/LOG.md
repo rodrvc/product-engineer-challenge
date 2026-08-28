@@ -36,7 +36,7 @@ Each commit references its issues (C1, C2...).
 | #4 | `fix/category-tree` | C4, C5 | Merged |
 | #5 | `fix/product-search` | C6, C7, C18 | Merged |
 | #6 | `fix/payment-retries` | C8, C9, C16 | Merged |
-| #7 | `fix/api-contract` | C13, C14, C15, C17 | Merged |
+| #7 | `fix/api-contract` | C13, C14, C15, C17 | Closed — landed on `main` in `98536a4` |
 
 ---
 
@@ -80,7 +80,12 @@ Order and rationale in D6. All 7 fixes merged and verified against the running a
 
 ## Phase 3 — Validate · COMPLETE
 
-- [x] Re-run all reproductions from `PROBLEMS.md` — none fail
+- [x] Re-run all reproductions from `PROBLEMS.md` — none fail. Four failure
+      paths could not be triggered without editing code or corrupting the
+      database by hand: C5 (category cycle), C10 (failure midway through
+      `cancel`), C16, and C9's revert — the payment failure is random at 10%
+      per attempt, so exhausting three retries is ~0.1%. Those were reasoned
+      through and read, not observed
 - [x] Verify no regressions in previously working code (R1-R7 still pass)
 - [x] End-to-end validation with cache, transactions, payments, search all working
 - [x] `pnpm exec tsc --noEmit` clean; `pnpm test` passes (the suite is a single

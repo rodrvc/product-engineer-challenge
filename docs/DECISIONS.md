@@ -20,7 +20,7 @@ Record of decisions made and their rationale. Especially the debatable ones: if 
 
 **Date:** 27-Aug-2026 · **Status:** Applied
 
-**Context:** Symptom 4 in the requirements is "cache does not behave as expected". The root cause is that `app.module.ts` passes `store` (singular) where `@nestjs/cache-manager` v7 only reads `options.stores` (plural): the Redis instance is silently discarded and cache falls back to an in-memory `Map`. **Redis sits connected but never receives a single write.**
+**Context:** Symptom 4 in the requirements is "cache does not behave as expected". The root cause is that `app.module.ts` passes `store` (singular) where `@nestjs/cache-manager` v7 only reads `options.stores` (plural): the Redis instance is silently discarded and cache falls back to an in-memory `Map`. **Redis sits connected but the application never writes a key to it** (`INFO commandstats` shows the `set`/`get` counters never move).
 
 **The obstacle:** First attempt was to just change `store` to `stores`. App fails to start: `Error: Invalid storage adapter`. The `cache-manager-ioredis-yet@2.1.2` store exposes `get`/`set`/**`del`**/**`reset`** (cache-manager v5 contract), but cache-manager v7 validates `get`/`set`/**`delete`**/**`clear`**. The old store doesn't fit the new version.
 

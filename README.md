@@ -36,7 +36,7 @@ Full write-up in [`docs/`](docs/): every problem with its repro and fix in
 With the stack up (`docker compose up -d && pnpm install && pnpm run start:dev`):
 
 ```bash
-# C13 — decimals come back as numbers, not "301.50" strings
+# C13 — decimals come back as numbers, not strings
 curl -s localhost:3000/orders/2/full | jq '.total, .items[0].product.price'
 
 # C15 — properties not declared in the DTO are rejected
@@ -50,9 +50,10 @@ curl -s -X POST localhost:3000/products/batch -H 'Content-Type: application/json
 # -> {"success":false,"processed":1,"failed":[99999]}
 
 # C6 — each search term gets its own cache entry
-curl -s 'localhost:3000/products/search?q=laptop' | jq -r '.[].name'
-curl -s 'localhost:3000/products/search?q=shoes'  | jq -r '.[].name'
-# before: the second query returned the first one's results
+curl -s 'localhost:3000/products/search?q=laptop'  | jq -r '.[].name'
+curl -s 'localhost:3000/products/search?q=zapatos' | jq -r '.[].name'
+# before: the second query returned the first one's results, because every
+# search was cached under the same key
 
 # C8 — paying the same order twice charges once
 ORDER=$(curl -s -X POST localhost:3000/orders -H 'Content-Type: application/json' \
@@ -61,13 +62,21 @@ curl -s -X POST localhost:3000/orders/$ORDER/pay   # 201 + transactionId
 curl -s -X POST localhost:3000/orders/$ORDER/pay   # 400, no second charge
 
 # C1 — concurrent orders cannot oversell.
-# Set stock to 10, then fire 4 concurrent orders of 3 (12 units for 10 in stock):
+# Reset stock to 10 first (the run consumes it):
+docker exec challenge-db psql -U postgres -d challengedb \
+  -c "update products set stock = 10 where id = 1;"
+
+# Then fire 4 concurrent orders of 3 units each — 12 units against 10 in stock:
 for i in $(seq 1 4); do
   curl -s -o /dev/null -w "%{http_code} " -X POST localhost:3000/orders \
     -H 'Content-Type: application/json' \
     -d '{"userId":1,"items":[{"productId":1,"quantity":3}]}' &
 done; wait; echo
-# -> 201 201 201 400, stock left at 1. Before the fix all four succeeded.
+
+# -> three 201s and one 400 (the order they print varies), stock left at 1:
+docker exec challenge-db psql -U postgres -d challengedb \
+  -c "select stock from products where id = 1;"
+# Before the fix all four succeeded and stock went negative.
 ```
 
 Each problem's original reproduction is in [`docs/PROBLEMS.md`](docs/PROBLEMS.md).
